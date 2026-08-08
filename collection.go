@@ -285,11 +285,7 @@ func openCollectionFTSRuntime(ctx context.Context, path string, field FieldSchem
 	if field.DataType != DataTypeString || field.IndexType() != IndexTypeFTS {
 		return nil, invalidArgument("open FTS index", "field %q is not an FTS-indexed STRING field", field.Name)
 	}
-	encoded, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read FTS artifact: %w", err)
-	}
-	dictionary, err := core.OpenFTSTermDictionary(ctx, encoded)
+	dictionary, err := core.OpenFTSTermDictionary(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -356,7 +352,7 @@ func (c *Collection) refreshSegmentIndexArtifactsLocked(ctx context.Context) err
 	created := make([]string, 0)
 	cleanup := func() {
 		for _, path := range created {
-			_ = os.Remove(path)
+			_ = os.RemoveAll(path)
 		}
 	}
 	for _, segment := range segments {
@@ -431,7 +427,14 @@ func (c *Collection) segmentIndexSnapshotFilesExist(metadata db.SegmentMetadata,
 	}
 	for _, artifact := range snapshot.Artifacts {
 		info, err := os.Lstat(filepath.Join(c.path, filepath.FromSlash(artifact.File)))
-		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		if err != nil || info.Mode()&os.ModeSymlink != 0 {
+			return false
+		}
+		if artifact.Kind == collectionFTSArtifactKind || artifact.Kind == collectionInvertArtifactKind {
+			if !info.IsDir() {
+				return false
+			}
+		} else if !info.Mode().IsRegular() {
 			return false
 		}
 	}
@@ -445,22 +448,37 @@ func (c *Collection) writeSegmentRuntimeArtifacts(ctx context.Context, segmentID
 	}
 	created := make([]string, 0)
 	artifacts := make([]db.IndexArtifactMetadata, 0)
-	writeArtifact := func(field, kind string, write func(string) error) error {
-		file, err := os.CreateTemp(indexDirectory, fmt.Sprintf("segment-%020d-*.zvi", segmentID))
-		if err != nil {
-			return err
-		}
-		path := file.Name()
-		if closeErr := file.Close(); closeErr != nil {
-			_ = os.Remove(path)
-			return closeErr
-		}
-		if err := os.Remove(path); err != nil {
-			return err
+	writeArtifact := func(field, kind string, directory bool, write func(string) error) error {
+		var path string
+		if directory {
+			createdDirectory, err := os.MkdirTemp(indexDirectory, fmt.Sprintf("segment-%020d-*.pebble", segmentID))
+			if err != nil {
+				return err
+			}
+			path = createdDirectory
+		} else {
+			file, err := os.CreateTemp(indexDirectory, fmt.Sprintf("segment-%020d-*.zvi", segmentID))
+			if err != nil {
+				return err
+			}
+			path = file.Name()
+			if closeErr := file.Close(); closeErr != nil {
+				_ = os.Remove(path)
+				return closeErr
+			}
+			if err := os.Remove(path); err != nil {
+				return err
+			}
 		}
 		if err := write(path); err != nil {
-			_ = os.Remove(path)
+			_ = os.RemoveAll(path)
 			return err
+		}
+		if directory {
+			if err := ailego.SyncDirectory(indexDirectory); err != nil {
+				_ = os.RemoveAll(path)
+				return fmt.Errorf("sync index artifact directory: %w", err)
+			}
 		}
 		created = append(created, path)
 		relative, err := filepath.Rel(c.path, path)
@@ -490,7 +508,7 @@ func (c *Collection) writeSegmentRuntimeArtifacts(ctx context.Context, segmentID
 				if !ok {
 					return fail(fmt.Errorf("dense index %q cannot be persisted", field.Name))
 				}
-				if err := writeArtifact(field.Name, kind, func(path string) error { return saver.Save(ctx, path) }); err != nil {
+				if err := writeArtifact(field.Name, kind, false, func(path string) error { return saver.Save(ctx, path) }); err != nil {
 					return fail(fmt.Errorf("persist segment dense index %q: %w", field.Name, err))
 				}
 				continue
@@ -501,7 +519,7 @@ func (c *Collection) writeSegmentRuntimeArtifacts(ctx context.Context, segmentID
 			if !ok {
 				return fail(fmt.Errorf("sparse index %q cannot be persisted", field.Name))
 			}
-			if err := writeArtifact(field.Name, kind, func(path string) error { return saver.Save(ctx, path) }); err != nil {
+			if err := writeArtifact(field.Name, kind, false, func(path string) error { return saver.Save(ctx, path) }); err != nil {
 				return fail(fmt.Errorf("persist segment sparse index %q: %w", field.Name, err))
 			}
 			continue
@@ -511,12 +529,8 @@ func (c *Collection) writeSegmentRuntimeArtifacts(ctx context.Context, segmentID
 			if runtime == nil || runtime.dictionary == nil {
 				return fail(fmt.Errorf("FTS index %q cannot be persisted", field.Name))
 			}
-			if err := writeArtifact(field.Name, collectionFTSArtifactKind, func(path string) error {
-				encoded, err := runtime.dictionary.Encode(ctx)
-				if err != nil {
-					return err
-				}
-				return ailego.WriteFileAtomic(ctx, path, encoded, 0o600)
+			if err := writeArtifact(field.Name, collectionFTSArtifactKind, true, func(path string) error {
+				return runtime.dictionary.Save(ctx, path)
 			}); err != nil {
 				return fail(fmt.Errorf("persist segment FTS index %q: %w", field.Name, err))
 			}
@@ -527,12 +541,8 @@ func (c *Collection) writeSegmentRuntimeArtifacts(ctx context.Context, segmentID
 			if index == nil {
 				return fail(fmt.Errorf("INVERT index %q cannot be persisted", field.Name))
 			}
-			if err := writeArtifact(field.Name, collectionInvertArtifactKind, func(path string) error {
-				encoded, err := index.Encode(ctx)
-				if err != nil {
-					return err
-				}
-				return ailego.WriteFileAtomic(ctx, path, encoded, 0o600)
+			if err := writeArtifact(field.Name, collectionInvertArtifactKind, true, func(path string) error {
+				return index.Save(ctx, path)
 			}); err != nil {
 				return fail(fmt.Errorf("persist segment INVERT index %q: %w", field.Name, err))
 			}
@@ -670,11 +680,7 @@ func buildCollectionRuntimeIndexes(
 			Indexed: true, RangeOptimized: rangeOptimized, ExtendedWildcard: extendedWildcard,
 		}
 		if artifact := artifacts[collectionIndexArtifactKey(field.Name, collectionInvertArtifactKind)]; artifact != "" {
-			encoded, err := os.ReadFile(artifact)
-			if err != nil {
-				return fail(fmt.Errorf("read INVERT artifact for field %q: %w", field.Name, err))
-			}
-			index, err := dbsql.OpenInvertedIndex(ctx, encoded)
+			index, err := dbsql.OpenInvertedIndex(ctx, artifact)
 			if err != nil {
 				return fail(fmt.Errorf("open INVERT artifact for field %q: %w", field.Name, err))
 			}

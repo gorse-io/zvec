@@ -178,9 +178,9 @@ projections, ANN parameters, grouping, and refinement.
 
 ## Compatibility
 
-The root `zvec` package is the public API. zvec uses its own versioned native Go
-disk format and does not read C++ zvec collection files. Readers require the
-current manifest's required fields and reject older manifests that omit them.
+The root `zvec` package is the public API. zvec uses native Go disk format v2
+and does not read C++ zvec collection files. Version 1 collections are rejected;
+there is no compatibility, migration, fallback, or dual-write path.
 
 ## License
 

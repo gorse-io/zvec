@@ -1,9 +1,10 @@
 # Native Go disk format
 
 The Go implementation uses its own disk format and does not open collection
-files created by the C++ implementation. Format version 1 starts with the
-versioned manifest protocol below; later storage files retain their own magic,
-version, length, and checksum fields.
+files created by the C++ implementation. Format version 2 uses the manifest
+protocol below and Pebble-backed FTS and INVERT persistence. Version 1 is
+rejected outright: there is no compatibility reader, fallback, migration, or
+dual-write path.
 
 ## Manifest publication
 
@@ -17,8 +18,8 @@ reserved document ID explicitly and reject manifests that omit it, preventing
 ID reuse when a rewrite reclaims the highest deleted or superseded versions.
 
 Optional segment index snapshots record the schema SHA-256, owning segment ID,
-document count and bounds, and field/kind/file metadata for immutable files in
-`indexes/`. Every identity component must match before a file is opened.
+document count and bounds, and field/kind/path metadata for immutable artifacts
+in `indexes/`. Every identity component must match before an artifact is opened.
 When index metadata is absent, indexes rebuild from segment documents.
 
 `CURRENT` is the commit point. It is itself framed and checksummed and names one
@@ -94,8 +95,10 @@ point: a crash before replacement recovers the old WAL, while a crash after
 replacement has every file needed by the new version. An empty flush only
 synchronizes the WAL and does not create a new manifest generation.
 
-Artifact names are unique and immutable. After segment publication, Flush
-builds vector, FTS, and INVERT artifacts only for newly immutable segments and
+Artifact names are unique and immutable. ANN artifacts remain regular `.zvi`
+files. FTS and INVERT artifacts are independent `.pebble` directories. After
+segment publication, Flush builds vector, FTS, and INVERT artifacts only for
+newly immutable segments and
 publishes their metadata in another atomic manifest generation. Metadata and
 files for unchanged segments are reused exactly. A failed retry never
 overwrites an immutable file. Unreferenced artifacts and higher-numbered orphan
@@ -121,12 +124,22 @@ are synchronized. Unknown files and manifest generations are never selected
 for pruning. A crash during pruning leaves only harmless unreferenced files;
 even a no-op Optimize retries the cleanup.
 
-HNSW, HNSW-RaBitQ, IVF, Vamana, DiskANN, sparse HNSW, FTS dictionaries, and
-INVERT postings have checksummed native artifacts. DiskANN retains its file or
-read-only mapping for random access until the collection closes; the persisted
-collection `EnableMmap` option selects that reader. Other formats decode into
-immutable memory before serving queries. Obsolete `indexes/*.zvi` files are
-pruned only after a newer manifest becomes authoritative.
+HNSW, HNSW-RaBitQ, IVF, Vamana, DiskANN, and sparse HNSW retain their native
+`.zvi` formats. FTS and INVERT use Pebble byte-ordered keys: document/row
+bitmaps and posting lists are split into bounded chunks whose ordinal suffixes
+must be contiguous. FTS keeps its independently checksummed compressed posting
+payloads inside those chunks. Reopen validates metadata, chunk ordering,
+posting domains, and dictionary statistics before publishing immutable memory.
+
+Each Pebble artifact also has a wrapper-owned, synchronized `ZVEC-INDEX` marker;
+the wrapper rejects a missing, corrupt, non-regular, or symlinked marker and
+rejects a symlink in place of the artifact directory. Collection manifests
+reference only completed directories. DiskANN retains its file or read-only
+mapping for random access until the collection closes; the persisted collection
+`EnableMmap` option selects that reader. Obsolete `indexes/*.zvi` files and
+`.pebble` directories are pruned only after a newer manifest becomes
+authoritative. Pruning refuses top-level symlinks and removes an obsolete
+Pebble directory as one package-owned artifact.
 
 ## DDL and Optimize crash boundary
 

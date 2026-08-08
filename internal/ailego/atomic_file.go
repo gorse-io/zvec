@@ -92,6 +92,16 @@ func WriteFileAtomic(ctx context.Context, path string, data []byte, perm fs.File
 	return nil
 }
 
+// SyncDirectory persists directory-entry changes where the platform supports
+// directory fsync. It is a no-op on platforms without portable directory
+// handles.
+func SyncDirectory(path string) error {
+	if path == "" {
+		return errors.New("ailego: empty directory path")
+	}
+	return syncDirectory(path)
+}
+
 func writeFull(writer io.Writer, data []byte) error {
 	for len(data) > 0 {
 		written, err := writer.Write(data)

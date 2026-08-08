@@ -23,15 +23,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"slices"
 
 	"github.com/gorse-io/zvec/internal/ailego"
 )
 
 const (
-	// DiskFormatVersion is the first native Go collection format. It is not
-	// compatible with the C++ collection format.
-	DiskFormatVersion uint32 = 1
+	// DiskFormatVersion is the Pebble-backed native Go collection format. It is
+	// not compatible with v1 or the C++ collection format.
+	DiskFormatVersion uint32 = 2
 
 	manifestHeaderSize = 32
 	maxManifestSize    = 64 << 20
@@ -188,6 +189,9 @@ func (m Manifest) Validate() error {
 			}
 			if err := validatePortableRelativePath(artifact.File); err != nil {
 				return fmt.Errorf("%w: segment %d index artifact %d: %v", ErrManifestCorrupt, snapshot.SegmentID, artifactIndex, err)
+			}
+			if (artifact.Kind == "fts" || artifact.Kind == "invert") && path.Ext(artifact.File) != ".pebble" {
+				return fmt.Errorf("%w: segment %d index artifact %d must be a Pebble directory", ErrManifestCorrupt, snapshot.SegmentID, artifactIndex)
 			}
 			key := artifact.Field + "\x00" + artifact.Kind
 			if _, duplicate := seenArtifacts[key]; duplicate {

@@ -1,14 +1,17 @@
 # Segment-native collection indexes
 
 Collection indexes are owned by immutable data segments. Each persisted
-segment may publish checksummed vector, FTS, and INVERT artifacts together with
+segment may publish vector, FTS, and INVERT artifacts together with
 the segment ID, document bounds, schema hash, and artifact paths in the
 manifest. Flat indexes remain reconstructed in memory because their source
 records already provide the exact representation.
 
+ANN artifacts are immutable `.zvi` files. FTS and INVERT artifacts are
+immutable `.pebble` directories with chunked ordered keys.
+
 `Flush` seals the current WAL-backed segment first, then builds artifacts only
-for immutable segments that do not already have matching metadata and regular
-files. Existing segment metadata and paths are copied unchanged into the next
+for immutable segments that do not already have matching metadata and valid
+artifacts. Existing segment metadata and paths are copied unchanged into the next
 manifest generation. The artifact set is published atomically and obsolete
 compacted-segment artifacts are pruned after publication.
 If a process stops between the data-segment and index-manifest publications,

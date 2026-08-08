@@ -113,23 +113,23 @@ Thus an output ID is the source's scan-order position minus the number of
 earlier deletions. Empty documents are preserved even though they have no
 postings. A term present only in deleted documents disappears, and maximum tf
 is recomputed from survivors. The output dictionary can immediately be
-queried, encoded, reopened, or fed into another merge; no source dictionary or
-bitmap is modified.
+queried, saved to Pebble, reopened, or fed into another merge; no source
+dictionary or bitmap is modified.
 
 ```go
 merged, err := core.MergeFTSTermDictionaries(ctx, []core.FTSSegmentView{
     {Dictionary: segment0, DeletedDocuments: deleted0},
     {Dictionary: segment1, DeletedDocuments: deleted1},
 })
-encoded, err := merged.Encode(ctx)
-reopened, err := core.OpenFTSTermDictionary(ctx, encoded)
+err = merged.Save(ctx, "segment-fts.pebble")
+reopened, err := core.OpenFTSTermDictionary(ctx, "segment-fts.pebble")
 ```
 
 An empty source slice produces a valid empty dictionary. Invalid deletion bits,
 nil source dictionaries, count overflow, cancellation, and malformed internal
-metadata fail explicitly with `ErrInvalidFTSMerge`. The existing dictionary
-encoder continues to own the on-disk magic, format version, and CRC32C
-boundaries; merging does not create a second disk format.
+metadata fail explicitly with `ErrInvalidFTSMerge`. Persistence writes term
+metadata and independently checksummed posting payloads as bounded,
+ordinal-keyed Pebble chunks.
 
 ## Compatibility and tests
 
@@ -138,8 +138,8 @@ commit `58375ff`, plus representative IDF/score values and dense merge counts.
 Tests cover formula values, parameter and statistics validation, ownership,
 concurrent scorer use, boolean/phrase/boost score composition, stable top-k,
 deletion-aware scoring, iterator seek, dense remapping, empty documents,
-all-deleted inputs, maximum-tf recomputation, position preservation, encode and
-reopen, source immutability, cancellation, concurrent merges, fuzzing, and
+all-deleted inputs, maximum-tf recomputation, position preservation, Pebble
+save and reopen, source immutability, cancellation, concurrent merges, fuzzing, and
 benchmarks.
 
 ```sh

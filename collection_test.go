@@ -393,7 +393,13 @@ func TestCollectionPersistsAndReopensSnapshotIndexes(t *testing.T) {
 		artifactKinds[artifact.Field] = artifact.Kind
 		info, statErr := os.Stat(filepath.Join(path, filepath.FromSlash(artifact.File)))
 		require.NoError(t, statErr)
-		require.True(t, info.Mode().IsRegular())
+		if artifact.Kind == collectionFTSArtifactKind || artifact.Kind == collectionInvertArtifactKind {
+			require.True(t, info.IsDir())
+			require.Equal(t, ".pebble", filepath.Ext(artifact.File))
+		} else {
+			require.True(t, info.Mode().IsRegular())
+			require.Equal(t, ".zvi", filepath.Ext(artifact.File))
+		}
 	}
 	require.Equal(t, collectionFTSArtifactKind, artifactKinds["text"])
 	require.Equal(t, collectionInvertArtifactKind, artifactKinds["rating"])
@@ -424,7 +430,7 @@ func TestCollectionPersistsAndReopensSnapshotIndexes(t *testing.T) {
 		}
 	}
 	require.NotEmpty(t, invertPath)
-	require.NoError(t, os.WriteFile(invertPath, []byte("corrupt"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(invertPath, "ZVEC-INDEX"), []byte("corrupt"), 0o600))
 	collection, err = Open(ctx, path, NewCollectionOptions())
 	require.NoError(t, err)
 	defer collection.Close()

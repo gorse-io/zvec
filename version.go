@@ -19,5 +19,5 @@ const (
 	Version = "0.5.0"
 
 	// NativeDiskFormatVersion identifies the independent Go collection format.
-	NativeDiskFormatVersion uint32 = 1
+	NativeDiskFormatVersion uint32 = 2
 )

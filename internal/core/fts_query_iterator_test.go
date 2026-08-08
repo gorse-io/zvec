@@ -17,6 +17,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -209,17 +210,15 @@ func TestFTSQueryIteratorASTAndDictionaryOwnership(t *testing.T) {
 		require.Equal(t, want, got)
 	}
 
-	encoded, err := dictionary.Encode(context.Background())
-	require.NoError(t, err)
-
-	reopened, err := OpenFTSTermDictionary(context.Background(), encoded)
+	path := filepath.Join(t.TempDir(), "query.pebble")
+	require.NoError(t, dictionary.Save(context.Background(), path))
+	reopened, err := OpenFTSTermDictionary(context.Background(), path)
 	require.NoError(t, err)
 
 	query := &FTSPhraseQueryNode{Flags: defaultFTSQueryModifier(), Terms: []string{"banana", "banana"}}
 	iterator, err = NewFTSQueryIterator(context.Background(), reopened, query, FTSQueryExecutionOptions{})
 	require.NoError(t, err)
 
-	clear(encoded)
 	{
 		got, want := collectFTSQueryDocuments(t, iterator), []uint32{3}
 		require.Equal(t, want, got)

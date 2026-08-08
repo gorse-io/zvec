@@ -66,7 +66,8 @@ func TestManifestValidation(t *testing.T) {
 		mutate   func(*Manifest)
 		expected error
 	}{
-		{name: "unsupported format", mutate: func(m *Manifest) { m.FormatVersion = 2 }, expected: ErrUnsupportedFormatVersion},
+		{name: "legacy format", mutate: func(m *Manifest) { m.FormatVersion = 1 }, expected: ErrUnsupportedFormatVersion},
+		{name: "future format", mutate: func(m *Manifest) { m.FormatVersion = 3 }, expected: ErrUnsupportedFormatVersion},
 		{name: "zero generation", mutate: func(m *Manifest) { m.Generation = 0 }, expected: ErrManifestCorrupt},
 		{name: "invalid schema", mutate: func(m *Manifest) { m.Schema = json.RawMessage(`{`) }, expected: ErrManifestCorrupt},
 		{name: "null schema", mutate: func(m *Manifest) { m.Schema = json.RawMessage(`null`) }, expected: ErrManifestCorrupt},
@@ -93,6 +94,9 @@ func TestManifestValidation(t *testing.T) {
 		{name: "short segment index hash", mutate: func(m *Manifest) { m.SegmentIndexSnapshots[0].SchemaSHA256 = "00" }, expected: ErrManifestCorrupt},
 		{name: "duplicate segment artifact", mutate: func(m *Manifest) {
 			m.SegmentIndexSnapshots[0].Artifacts = append(m.SegmentIndexSnapshots[0].Artifacts, m.SegmentIndexSnapshots[0].Artifacts[0])
+		}, expected: ErrManifestCorrupt},
+		{name: "legacy FTS artifact", mutate: func(m *Manifest) {
+			m.SegmentIndexSnapshots[0].Artifacts[0].File = "indexes/legacy.zvi"
 		}, expected: ErrManifestCorrupt},
 	}
 
@@ -142,7 +146,8 @@ func TestManifestDetectsCorruptionAndTruncation(t *testing.T) {
 		expected error
 	}{
 		{name: "magic", mutate: func(data []byte) []byte { data[0] ^= 0xff; return data }, expected: ErrManifestCorrupt},
-		{name: "format", mutate: func(data []byte) []byte { binary.LittleEndian.PutUint16(data[8:10], 2); return data }, expected: ErrUnsupportedFormatVersion},
+		{name: "legacy format", mutate: func(data []byte) []byte { binary.LittleEndian.PutUint16(data[8:10], 1); return data }, expected: ErrUnsupportedFormatVersion},
+		{name: "future format", mutate: func(data []byte) []byte { binary.LittleEndian.PutUint16(data[8:10], 3); return data }, expected: ErrUnsupportedFormatVersion},
 		{name: "header size", mutate: func(data []byte) []byte { binary.LittleEndian.PutUint16(data[10:12], 31); return data }, expected: ErrManifestCorrupt},
 		{name: "generation", mutate: func(data []byte) []byte { binary.LittleEndian.PutUint64(data[12:20], 8); return data }, expected: ErrManifestCorrupt},
 		{name: "huge length", mutate: func(data []byte) []byte { binary.LittleEndian.PutUint64(data[20:28], math.MaxUint64); return data }, expected: ErrManifestCorrupt},
@@ -313,7 +318,7 @@ func sampleManifest(generation uint64) Manifest {
 		SegmentIndexSnapshots: []SegmentIndexSnapshotMetadata{{
 			SegmentID: 3, SchemaSHA256: strings.Repeat("b", 64), DocumentCount: 8,
 			MinDocumentID: 10, MaxDocumentID: 19,
-			Artifacts: []IndexArtifactMetadata{{Field: "text", Kind: "fts", File: "indexes/segment-3-text.zvi"}},
+			Artifacts: []IndexArtifactMetadata{{Field: "text", Kind: "fts", File: "indexes/segment-3-text.pebble"}},
 		}},
 	}
 }

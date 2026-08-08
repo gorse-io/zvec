@@ -16,18 +16,15 @@ package core
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/gorse-io/zvec/internal/ailego"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -173,68 +170,10 @@ func TestFTSTermDictionaryPrefixAndSnapshot(t *testing.T) {
 	require.True(t, second.TermCount() == 4)
 }
 
-func TestFTSTermDictionaryEncodeReopen(t *testing.T) {
-	dictionary := buildFTSTestDictionary(t, [][]Token{
-		{{Text: "", Position: 0}, {Text: "alpha", Position: 1}, {Text: "alpha", Position: 2}},
-		nil,
-		{{Text: "alphabet", Position: 0}, {Text: string([]byte{0xff, 'x'}), Position: 1}},
-	})
-	encoded, err := dictionary.Encode(context.Background())
-	require.NoError(t, err)
-
-	encodedAgain, err := dictionary.Encode(context.Background())
-	require.NoError(t, err,
-		"encoding is not deterministic")
-	require.Equal(t, encoded, encodedAgain,
-		"encoding is not deterministic")
-
-	reopened, err := OpenFTSTermDictionary(context.Background(), encoded)
-	require.NoError(t, err)
-
-	encoded[0] ^= 0xff
-	require.Equal(t, dictionary.TermCount(), reopened.TermCount(),
-		"reopened dictionary differs")
-	require.Equal(t, dictionary.Terms(), reopened.Terms(),
-		"reopened dictionary differs")
-	require.Equal(t, dictionary.Stats(), reopened.Stats(),
-		"reopened dictionary differs")
-
-	for _, term := range dictionary.Terms() {
-		wantInfo, wantList, _ := dictionary.Lookup(term)
-		gotInfo, gotList, found := reopened.Lookup(term)
-		require.True(t, found)
-		require.Equal(t, wantInfo, gotInfo)
-		require.Equal(t, collectFTSPostings(wantList.Iterator()), collectFTSPostings(gotList.Iterator()))
-	}
-	reencoded, err := reopened.Encode(context.Background())
-	require.NoError(t, err,
-		"reopened encoding is not byte-identical")
-	require.Equal(t, encodedAgain, reencoded,
-		"reopened encoding is not byte-identical")
-	{
-		length, found := reopened.DocumentLength(1)
-		require.True(t, found)
-		require.True(t, length == 0)
-	}
-	{
-		_, found := reopened.DocumentLength(3)
-		require.False(t, found,
-			"out-of-range document length found")
-	}
-}
-
 func TestFTSTermDictionaryAllEmptyDocuments(t *testing.T) {
 	dictionary := buildFTSTestDictionary(t, [][]Token{nil, nil})
 	require.True(t, dictionary.TermCount() == 0)
 	require.Equal(t, FTSSegmentStats{TotalDocuments: 2}, dictionary.Stats())
-
-	encoded, err := dictionary.Encode(context.Background())
-	require.NoError(t, err)
-
-	reopened, err := OpenFTSTermDictionary(context.Background(), encoded)
-	require.NoError(t, err)
-	require.True(t, reopened.TermCount() == 0)
-	require.Equal(t, dictionary.Stats(), reopened.Stats())
 }
 
 func TestFTSFieldBuilderInvalidInputAndCancellation(t *testing.T) {
@@ -297,162 +236,30 @@ func TestFTSFieldBuilderInvalidInputAndCancellation(t *testing.T) {
 	}
 }
 
-func TestFTSTermDictionaryEncodeOpenCancellation(t *testing.T) {
+func TestFTSTermDictionarySaveOpenCancellation(t *testing.T) {
 	tokens := make([]Token, 4200)
 	for index := range tokens {
 		tokens[index] = Token{Text: fmt.Sprintf("term-%05d", index), Position: uint32(index)}
 	}
 	dictionary := buildFTSTestDictionary(t, [][]Token{tokens})
 	{
-		_, err := dictionary.Encode(newCancelAfterChecks(3))
+		err := dictionary.Save(newCancelAfterChecks(3), filepath.Join(t.TempDir(), "canceled.pebble"))
 		require.ErrorIs(t, err, context.Canceled)
 	}
 
-	encoded, err := dictionary.Encode(context.Background())
-	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "dictionary.pebble")
+	require.NoError(t, dictionary.Save(context.Background(), path))
 	{
-		_, err := OpenFTSTermDictionary(newCancelAfterChecks(3), encoded)
+		_, err := OpenFTSTermDictionary(newCancelAfterChecks(3), path)
 		require.ErrorIs(t, err, context.Canceled)
 	}
 
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	{
-		_, err := OpenFTSTermDictionary(canceled, encoded)
+		_, err := OpenFTSTermDictionary(canceled, path)
 		require.ErrorIs(t, err, context.Canceled)
 	}
-}
-
-func TestFTSTermDictionaryCorruption(t *testing.T) {
-	dictionary := buildFTSTestDictionary(t, [][]Token{
-		{{Text: "alpha", Position: 0}, {Text: "alphabet", Position: 1}},
-		{{Text: "alpha", Position: 0}},
-	})
-	valid, err := dictionary.Encode(context.Background())
-	require.NoError(t, err)
-
-	tests := map[string]func([]byte) []byte{
-		"truncated": func(data []byte) []byte { return data[:20] },
-		"magic": func(data []byte) []byte {
-			data[0] ^= 1
-			return data
-		},
-		"version": func(data []byte) []byte {
-			binary.LittleEndian.PutUint16(data[4:6], 99)
-			repairFTSDictionaryCRCs(data)
-			return data
-		},
-		"header crc": func(data []byte) []byte {
-			data[60] ^= 1
-			return data
-		},
-		"payload crc": func(data []byte) []byte {
-			data[len(data)-1] ^= 1
-			return data
-		},
-		"reserved": func(data []byte) []byte {
-			data[44] = 1
-			repairFTSDictionaryCRCs(data)
-			return data
-		},
-		"impossible term count": func(data []byte) []byte {
-			binary.LittleEndian.PutUint32(data[8:12], ^uint32(0))
-			repairFTSDictionaryCRCs(data)
-			return data
-		},
-		"token total": func(data []byte) []byte {
-			binary.LittleEndian.PutUint32(data[ftsDictionaryHeaderSize:ftsDictionaryHeaderSize+4], 99)
-			repairFTSDictionaryCRCs(data)
-			return data
-		},
-		"first prefix": func(data []byte) []byte {
-			termsOffset := binary.LittleEndian.Uint32(data[28:32])
-			data[termsOffset] = 1
-			repairFTSDictionaryCRCs(data)
-			return data
-		},
-		"nested posting": func(data []byte) []byte {
-			postingsOffset := binary.LittleEndian.Uint32(data[32:36])
-			data[postingsOffset] ^= 1
-			repairFTSDictionaryCRCs(data)
-			return data
-		},
-	}
-	for name, mutate := range tests {
-		t.Run(name, func(t *testing.T) {
-			data := mutate(append([]byte(nil), valid...))
-			{
-				opened, err := OpenFTSTermDictionary(context.Background(), data)
-				require.Nil(t, opened)
-				require.ErrorIs(t, err, ErrCorruptFTSDictionary)
-			}
-		})
-	}
-	{
-		_, err := OpenFTSTermDictionary(nil, nil)
-		require.ErrorIs(t, err, ErrCorruptFTSDictionary)
-	}
-}
-
-func TestFTSTermDictionaryConcurrentUse(t *testing.T) {
-	dictionary := buildFTSTestDictionary(t, [][]Token{
-		{{Text: "alpha", Position: 0}, {Text: "beta", Position: 1}, {Text: "alpha", Position: 2}},
-		{{Text: "beta", Position: 0}},
-	})
-	want, err := dictionary.Encode(context.Background())
-	require.NoError(t, err)
-
-	var wait sync.WaitGroup
-	errorsChannel := make(chan error, 32)
-	for worker := 0; worker < 32; worker++ {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			for iteration := 0; iteration < 50; iteration++ {
-				_, posting, found := dictionary.Lookup("alpha")
-				if !found || len(collectFTSPostings(posting.Iterator())) != 1 {
-					errorsChannel <- errors.New("lookup differs")
-					return
-				}
-				encoded, err := dictionary.Encode(context.Background())
-				if err != nil || !assert.Equal(t, want, encoded) {
-					errorsChannel <- errors.New("encoding differs")
-					return
-				}
-			}
-		}()
-	}
-	wait.Wait()
-	close(errorsChannel)
-	for err := range errorsChannel {
-		require.NoError(t, err)
-	}
-}
-
-func FuzzFTSTermDictionaryOpen(f *testing.F) {
-	dictionary := buildFTSTestDictionary(f, [][]Token{
-		{{Text: "alpha", Position: 0}, {Text: "beta", Position: 1}},
-		{{Text: "alpha", Position: 0}},
-	})
-	encoded, err := dictionary.Encode(context.Background())
-	require.NoError(f, err)
-
-	f.Add(encoded)
-	f.Add([]byte{})
-	f.Add([]byte("ZVFD"))
-	f.Fuzz(func(t *testing.T, data []byte) {
-		dictionary, err := OpenFTSTermDictionary(context.Background(), data)
-		if err != nil {
-			return
-		}
-		require.True(t, uint64(dictionary.TermCount()) <= uint64(len(data)))
-		require.True(t, dictionary.Stats().TotalDocuments <= uint64(len(data))/4)
-		{
-			terms := dictionary.Terms()
-			require.True(t, sortStringsStrict(terms),
-				"terms are not sorted")
-		}
-	})
 }
 
 func BenchmarkFTSTermDictionaryBuild(b *testing.B) {
@@ -496,23 +303,6 @@ func buildFTSTestDictionary(t testing.TB, documents [][]Token) *FTSTermDictionar
 	require.NoError(t, err)
 
 	return dictionary
-}
-
-func repairFTSDictionaryCRCs(data []byte) {
-	if len(data) < ftsDictionaryHeaderSize {
-		return
-	}
-	binary.LittleEndian.PutUint32(data[40:44], ailego.CRC32C(data[ftsDictionaryHeaderSize:]))
-	binary.LittleEndian.PutUint32(data[60:64], ailego.CRC32C(data[:60]))
-}
-
-func sortStringsStrict(values []string) bool {
-	for index := 1; index < len(values); index++ {
-		if values[index-1] >= values[index] {
-			return false
-		}
-	}
-	return true
 }
 
 func TestFTSSegmentStatsAverageEmpty(t *testing.T) {
@@ -616,10 +406,9 @@ func TestFTSTermDictionaryLongSharedPrefix(t *testing.T) {
 		{Text: prefix + "a", Position: 0},
 		{Text: prefix + "b", Position: 1},
 	}})
-	encoded, err := dictionary.Encode(context.Background())
-	require.NoError(t, err)
-
-	reopened, err := OpenFTSTermDictionary(context.Background(), encoded)
+	path := filepath.Join(t.TempDir(), "long-prefix.pebble")
+	require.NoError(t, dictionary.Save(context.Background(), path))
+	reopened, err := OpenFTSTermDictionary(context.Background(), path)
 	require.NoError(t, err)
 	require.Equal(t, dictionary.Terms(), reopened.Terms())
 }

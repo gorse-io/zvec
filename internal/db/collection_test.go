@@ -43,11 +43,16 @@ func TestCollectionPublishSegmentIndexSnapshotsAndPrune(t *testing.T) {
 	require.NoError(t, os.MkdirAll(indexDirectory, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(indexDirectory, "segment.zvi"), []byte("segment"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(indexDirectory, "obsolete.zvi"), []byte("obsolete"), 0o600))
+	require.NoError(t, os.Mkdir(filepath.Join(indexDirectory, "segment.pebble"), 0o700))
+	require.NoError(t, os.Mkdir(filepath.Join(indexDirectory, "obsolete.pebble"), 0o700))
 	segment := store.Manifest().PersistedSegments[0]
 	snapshots := []SegmentIndexSnapshotMetadata{{
 		SegmentID: segment.ID, SchemaSHA256: strings.Repeat("a", 64),
 		DocumentCount: segment.DocCount, MinDocumentID: segment.MinDocID, MaxDocumentID: segment.MaxDocID,
-		Artifacts: []IndexArtifactMetadata{{Field: "embedding", Kind: "vector-2", File: "indexes/segment.zvi"}},
+		Artifacts: []IndexArtifactMetadata{
+			{Field: "embedding", Kind: "vector-2", File: "indexes/segment.zvi"},
+			{Field: "rating", Kind: "invert", File: "indexes/segment.pebble"},
+		},
 	}}
 	committed, err := store.PublishSegmentIndexSnapshots(ctx, snapshots)
 	require.NoError(t, err)
@@ -64,6 +69,11 @@ func TestCollectionPublishSegmentIndexSnapshotsAndPrune(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrNotExist)
 	_, err = os.Stat(filepath.Join(indexDirectory, "segment.zvi"))
 	require.NoError(t, err)
+	_, err = os.Stat(filepath.Join(indexDirectory, "obsolete.pebble"))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	info, err := os.Stat(filepath.Join(indexDirectory, "segment.pebble"))
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
 	require.NoError(t, store.Close())
 }
 

@@ -532,7 +532,7 @@ func (c *CollectionStore) PruneObsoleteArtifacts(ctx context.Context) error {
 	}{
 		{filepath.Join(c.dir, "wal"), []string{"*.wal.lock", "*.wal"}},
 		{filepath.Join(c.dir, "snapshots"), []string{"primary-*.snap", "delete-*.snap"}},
-		{filepath.Join(c.dir, "indexes"), []string{"*.zvi"}},
+		{filepath.Join(c.dir, "indexes"), []string{"*.zvi", "*.pebble"}},
 	} {
 		matches, matchErr := ownedFiles(specification.directory, specification.patterns...)
 		if matchErr != nil {
@@ -546,9 +546,6 @@ func (c *CollectionStore) PruneObsoleteArtifacts(ctx context.Context) error {
 			return err
 		}
 		name = filepath.Clean(name)
-		if _, retained := keep[name]; retained {
-			continue
-		}
 		info, err := os.Lstat(name)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -556,10 +553,22 @@ func (c *CollectionStore) PruneObsoleteArtifacts(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("db: inspect obsolete artifact %q: %w", name, err)
 		}
-		if !info.Mode().IsRegular() {
+		if info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("db: refuse to prune non-regular artifact %q", name)
 		}
-		if err := os.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+		directoryArtifact := filepath.Ext(name) == ".pebble"
+		if directoryArtifact && !info.IsDir() || !directoryArtifact && !info.Mode().IsRegular() {
+			return fmt.Errorf("db: refuse to prune invalid artifact %q", name)
+		}
+		if _, retained := keep[name]; retained {
+			continue
+		}
+		if directoryArtifact {
+			err = os.RemoveAll(name)
+		} else {
+			err = os.Remove(name)
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("db: remove obsolete artifact %q: %w", name, err)
 		}
 		touchedDirectories[filepath.Dir(name)] = struct{}{}
@@ -831,8 +840,8 @@ func (c *CollectionStore) PublishSchema(ctx context.Context, schema json.RawMess
 }
 
 // PublishSegmentIndexSnapshots atomically installs immutable per-segment index
-// metadata. Artifacts must already exist as regular files below the collection
-// directory.
+// metadata. Vector artifacts must already exist as regular files and FTS/INVERT
+// artifacts as Pebble directories below the collection directory.
 func (c *CollectionStore) PublishSegmentIndexSnapshots(ctx context.Context, snapshots []SegmentIndexSnapshotMetadata) (committed bool, err error) {
 	if c == nil {
 		return false, errors.New("db: nil collection")
@@ -865,7 +874,14 @@ func (c *CollectionStore) PublishSegmentIndexSnapshots(ctx context.Context, snap
 			if statErr != nil {
 				return false, fmt.Errorf("db: inspect segment index artifact %q: %w", artifact.File, statErr)
 			}
-			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return false, fmt.Errorf("db: segment index artifact %q is a symlink", artifact.File)
+			}
+			pebbleDirectory := artifact.Kind == "fts" || artifact.Kind == "invert"
+			if pebbleDirectory && !info.IsDir() {
+				return false, fmt.Errorf("db: segment index artifact %q is not a Pebble directory", artifact.File)
+			}
+			if !pebbleDirectory && !info.Mode().IsRegular() {
 				return false, fmt.Errorf("db: segment index artifact %q is not a regular file", artifact.File)
 			}
 		}

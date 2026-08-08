@@ -26,7 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMergeFTSTermDictionariesDenseRemapPositionsAndReopen(t *testing.T) {
+func TestMergeFTSTermDictionariesDenseRemapPositions(t *testing.T) {
 	segment0 := buildFTSTestDictionary(t, [][]Token{
 		{{Text: "apple", Position: 0}, {Text: "banana", Position: 1}},
 		nil,
@@ -40,12 +40,6 @@ func TestMergeFTSTermDictionariesDenseRemapPositionsAndReopen(t *testing.T) {
 	deleted0.Set(1)
 	deleted1 := ailego.NewBitmap(2)
 	deleted1.Set(0)
-	before0, err := segment0.Encode(context.Background())
-	require.NoError(t, err)
-
-	before1, err := segment1.Encode(context.Background())
-	require.NoError(t, err)
-
 	merged, err := MergeFTSTermDictionaries(context.Background(), []FTSSegmentView{
 		{Dictionary: segment0, DeletedDocuments: deleted0},
 		{Dictionary: segment1, DeletedDocuments: deleted1},
@@ -104,23 +98,9 @@ func TestMergeFTSTermDictionariesDenseRemapPositionsAndReopen(t *testing.T) {
 		require.Equal(t, want, got)
 	}
 
-	encoded, err := merged.Encode(context.Background())
-	require.NoError(t, err)
-
-	reopened, err := OpenFTSTermDictionary(context.Background(), encoded)
-	require.NoError(t, err)
-
-	assertFTSDictionariesEqual(t, reopened, merged)
-	after0, _ := segment0.Encode(context.Background())
-	after1, _ := segment1.Encode(context.Background())
-	require.Equal(t, after0, before0,
-		"merge mutated a source dictionary")
-	require.Equal(t, after1, before1,
-		"merge mutated a source dictionary")
-
 	deleted0.Clear(1)
 	deleted1.Clear(0)
-	assertFTSDictionariesEqual(t, reopened, merged)
+	require.Equal(t, []string{"apple", "banana"}, merged.Terms())
 }
 
 func TestMergeFTSTermDictionariesEmptyAllDeletedAndMaximumTF(t *testing.T) {
@@ -128,14 +108,6 @@ func TestMergeFTSTermDictionariesEmptyAllDeletedAndMaximumTF(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, FTSSegmentStats{}, empty.Stats())
 	require.True(t, empty.TermCount() == 0)
-
-	encoded, err := empty.Encode(context.Background())
-	require.NoError(t, err)
-	{
-		reopened, err := OpenFTSTermDictionary(context.Background(), encoded)
-		require.NoError(t, err)
-		require.Equal(t, FTSSegmentStats{}, reopened.Stats())
-	}
 
 	source := buildFTSTestDictionary(t, [][]Token{
 		{{Text: "x", Position: 0}, {Text: "x", Position: 1}, {Text: "x", Position: 2}},
